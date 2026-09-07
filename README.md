@@ -1,3 +1,8 @@
+Ecowitt WSxx serial data hack using a LilyGO T-Echo. Reads live weather data from the sensor, transmits it via the Helium LoRaWAN network, and forwards it through MQTT to the KWind App backend.
+
+
+
+
 With the device completely powered off:
 
 Use continuity mode between each button terminal and the labelled GND hole.
