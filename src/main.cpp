@@ -67,12 +67,15 @@ static constexpr uint32_t GPS_STALE_MS =
     300000UL;
 
 static constexpr uint32_t JOIN_RETRY_MIN_MS =
-    30000UL;
+    15000UL;
 
 static constexpr uint32_t JOIN_RETRY_MAX_MS =
-    15UL * 60UL * 1000UL;
+    60000UL;
 
 static uint32_t currentJoinRetryMs =
+    JOIN_RETRY_MIN_MS;
+
+static uint32_t nextJoinRetryMs =
     JOIN_RETRY_MIN_MS;
 
 static constexpr uint32_t STATUS_INTERVAL_MS =
@@ -1398,6 +1401,9 @@ static bool joinLorawan()
     const int16_t state =
         lorawan->activateOTAA();
 
+    // Start the retry delay only after this blocking join attempt finishes.
+    lastJoinAttemptMs = millis();
+
     SERIAL_MON.print(
         "[LoRaWAN] Join result: "
     );
@@ -1418,6 +1424,9 @@ static bool joinLorawan()
         currentJoinRetryMs =
             JOIN_RETRY_MIN_MS;
 
+        nextJoinRetryMs =
+            JOIN_RETRY_MIN_MS;
+
         SERIAL_MON.println(
             "[LoRaWAN] Joined successfully"
         );
@@ -1436,13 +1445,8 @@ static bool joinLorawan()
             "[LoRaWAN] Join failed"
         );
 
-        const uint32_t nextRetryMs =
-            min(
-                currentJoinRetryMs * 2UL,
-                JOIN_RETRY_MAX_MS
-            );
-
-        currentJoinRetryMs = nextRetryMs;
+        // Schedule this retry first, then prepare the following backoff.
+        currentJoinRetryMs = nextJoinRetryMs;
 
         SERIAL_MON.print(
             "[LoRaWAN] Next retry in "
@@ -1451,6 +1455,14 @@ static bool joinLorawan()
             currentJoinRetryMs / 1000UL
         );
         SERIAL_MON.println(" seconds");
+
+        // Increase only the delay used after the following failed attempt.
+        // Aggressive retry sequence: 15 s, 30 s, then every 60 s.
+        nextJoinRetryMs =
+            min(
+                nextJoinRetryMs * 2UL,
+                JOIN_RETRY_MAX_MS
+            );
     }
 
     return joined;
@@ -1807,7 +1819,12 @@ void setup()
 
     updateDisplay();
 
-    lastJoinAttemptMs = millis();
+    // joinLorawan() records the completion time of the initial attempt.
+    // Set it here only if radio initialization failed before any join attempt.
+    if (lorawan == nullptr)
+    {
+        lastJoinAttemptMs = millis();
+    }
     lastSendMs = millis();
     lastStatusMs = millis();
 
@@ -1828,14 +1845,12 @@ void loop()
 
     const uint32_t now = millis();
 
-    // Retry OTAA using exponential backoff.
+    // Retry OTAA using bounded exponential backoff.
     if (lorawan != nullptr &&
         !lorawanJoined &&
         now - lastJoinAttemptMs >=
             currentJoinRetryMs)
     {
-        lastJoinAttemptMs = now;
-
         lorawanJoined =
             joinLorawan();
 
@@ -1846,7 +1861,7 @@ void loop()
         }
     }
 
-    // Send payload every 60 seconds.
+    // Send using the current interval (60 seconds by default).
     if (lorawan != nullptr &&
         lorawanJoined &&
         now - lastSendMs >=
