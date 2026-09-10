@@ -66,8 +66,14 @@ static constexpr uint32_t SENSOR_STALE_MS =
 static constexpr uint32_t GPS_STALE_MS =
     300000UL;
 
-static constexpr uint32_t JOIN_RETRY_MS =
-    60000UL;
+static constexpr uint32_t JOIN_RETRY_MIN_MS =
+    30000UL;
+
+static constexpr uint32_t JOIN_RETRY_MAX_MS =
+    15UL * 60UL * 1000UL;
+
+static uint32_t currentJoinRetryMs =
+    JOIN_RETRY_MIN_MS;
 
 static constexpr uint32_t STATUS_INTERVAL_MS =
     10000UL;
@@ -1314,6 +1320,13 @@ static bool initializeRadio()
         &EU868
     );
 
+    // Give the T-Echo extra tolerance when opening RX1/RX2.
+    // This helps diagnose intermittent join-accept reception.
+    lorawan->scanGuard = 50;
+
+    // Let the network optimize the data rate after activation.
+    lorawan->setADR(true);
+
     // Helium LoRaWAN 1.0.x:
     // NwkKey is NULL; AppKey is used.
     state = lorawan->beginOTAA(
@@ -1336,6 +1349,41 @@ static bool initializeRadio()
     return true;
 }
 
+static const char* lorawanResultText(
+    int16_t state
+)
+{
+    switch (state)
+    {
+        case RADIOLIB_LORAWAN_NEW_SESSION:
+            return "NEW SESSION";
+
+        case RADIOLIB_LORAWAN_SESSION_RESTORED:
+            return "SESSION RESTORED";
+
+        case RADIOLIB_ERR_NO_JOIN_ACCEPT:
+            return "NO JOIN ACCEPT";
+
+        case RADIOLIB_ERR_RX_TIMEOUT:
+            return "RX TIMEOUT";
+
+        case RADIOLIB_ERR_MIC_MISMATCH:
+            return "MIC MISMATCH";
+
+        case RADIOLIB_ERR_JOIN_NONCE_INVALID:
+            return "JOIN NONCE INVALID";
+
+        case RADIOLIB_ERR_NETWORK_NOT_JOINED:
+            return "NETWORK NOT JOINED";
+
+        case RADIOLIB_ERR_NONE:
+            return "ERR NONE";
+
+        default:
+            return "UNKNOWN ERROR";
+    }
+}
+
 static bool joinLorawan()
 {
     if (lorawan == nullptr)
@@ -1353,10 +1401,13 @@ static bool joinLorawan()
     SERIAL_MON.print(
         "[LoRaWAN] Join result: "
     );
-    SERIAL_MON.println(state);
+    SERIAL_MON.print(state);
+    SERIAL_MON.print(" - ");
+    SERIAL_MON.println(
+        lorawanResultText(state)
+    );
 
     const bool joined =
-        state == RADIOLIB_ERR_NONE ||
         state ==
             RADIOLIB_LORAWAN_NEW_SESSION ||
         state ==
@@ -1364,8 +1415,19 @@ static bool joinLorawan()
 
     if (joined)
     {
+        currentJoinRetryMs =
+            JOIN_RETRY_MIN_MS;
+
         SERIAL_MON.println(
             "[LoRaWAN] Joined successfully"
+        );
+
+        SERIAL_MON.print(
+            "[LoRaWAN] DevAddr: 0x"
+        );
+        SERIAL_MON.println(
+            lorawan->getDevAddr(),
+            HEX
         );
     }
     else
@@ -1373,9 +1435,22 @@ static bool joinLorawan()
         SERIAL_MON.println(
             "[LoRaWAN] Join failed"
         );
-        SERIAL_MON.println(
-            "[LoRaWAN] Retry in 60 seconds"
+
+        const uint32_t nextRetryMs =
+            min(
+                currentJoinRetryMs * 2UL,
+                JOIN_RETRY_MAX_MS
+            );
+
+        currentJoinRetryMs = nextRetryMs;
+
+        SERIAL_MON.print(
+            "[LoRaWAN] Next retry in "
         );
+        SERIAL_MON.print(
+            currentJoinRetryMs / 1000UL
+        );
+        SERIAL_MON.println(" seconds");
     }
 
     return joined;
@@ -1753,11 +1828,11 @@ void loop()
 
     const uint32_t now = millis();
 
-    // Retry joining every 60 seconds.
+    // Retry OTAA using exponential backoff.
     if (lorawan != nullptr &&
         !lorawanJoined &&
         now - lastJoinAttemptMs >=
-            JOIN_RETRY_MS)
+            currentJoinRetryMs)
     {
         lastJoinAttemptMs = now;
 
